@@ -1,31 +1,31 @@
-// *
-// |--------------------------------------------------------------------------
-// | CortexFlow Workflow Worker
-// |--------------------------------------------------------------------------
-// |
-// | This file runs as a separate Node.js process.
-// |
-// | Flow:
-// |
-// | Frontend
-// |    ↓
-// | Express API
-// |    ↓
-// | BullMQ Queue
-// |    ↓
-// | Redis
-// |    ↓
-// | THIS WORKER
-// |    ↓
-// | Workflow Engine
-// |    ↓
-// | AI / Logic / Integrations
-// |
-// |--------------------------------------------------------------------------
-// */
+// -----------------------------------------------------------------------------
+// CortexFlow Workflow Worker
+// -----------------------------------------------------------------------------
+//
+// Flow:
+//
+// Frontend
+//    ↓
+// Express API
+//    ↓
+// BullMQ Queue
+//    ↓
+// Redis
+//    ↓
+// THIS WORKER
+//    ↓
+// Workflow Engine
+//    ↓
+// AI / Logic / Integrations
+//
+// This process also exposes a tiny HTTP health endpoint so platforms such as
+// Back4App can verify that the worker container is alive.
+//
+// -----------------------------------------------------------------------------
 
 require("dotenv").config();
 
+const http = require("http");
 const { Worker } = require("bullmq");
 
 const connectDB = require("../config/db");
@@ -46,21 +46,109 @@ const {
 } = require("../services/executionService");
 
 
-/*
-|--------------------------------------------------------------------------
-| WORKER SETTINGS
-|--------------------------------------------------------------------------
-*/
+// -----------------------------------------------------------------------------
+// WORKER SETTINGS
+// -----------------------------------------------------------------------------
 
 const CONCURRENCY =
   Number(process.env.WORKER_CONCURRENCY) || 5;
 
 
-/*
-|--------------------------------------------------------------------------
-| PROCESS ONE JOB
-|--------------------------------------------------------------------------
-*/
+// Back4App provides PORT automatically.
+// Locally the worker will use 8080 unless WORKER_HEALTH_PORT is provided.
+const HEALTH_PORT =
+  Number(
+    process.env.WORKER_HEALTH_PORT ||
+    process.env.PORT
+  ) || 8080;
+
+
+// -----------------------------------------------------------------------------
+// HEALTH SERVER
+// -----------------------------------------------------------------------------
+
+let healthServer = null;
+
+let workerState = {
+  status: "starting",
+  mongoConnected: false,
+  redisConnected: false,
+  startedAt: new Date().toISOString(),
+};
+
+
+// Start a tiny HTTP server.
+//
+// Back4App checks whether something is listening on its assigned PORT.
+// The BullMQ worker itself does not expose HTTP, so this server exists only
+// for container health checks.
+const startHealthServer = () => {
+  healthServer = http.createServer((req, res) => {
+    if (
+      req.url === "/" ||
+      req.url === "/health"
+    ) {
+      res.writeHead(200, {
+        "Content-Type": "application/json",
+        "Cache-Control": "no-store",
+      });
+
+      res.end(
+        JSON.stringify({
+          status: workerState.status,
+          service: "CortexFlow Worker",
+          mongoConnected:
+            workerState.mongoConnected,
+          redisConnected:
+            workerState.redisConnected,
+          queue: QUEUE_NAME,
+          concurrency: CONCURRENCY,
+          startedAt: workerState.startedAt,
+          timestamp: new Date().toISOString(),
+        })
+      );
+
+      return;
+    }
+
+
+    res.writeHead(404, {
+      "Content-Type": "application/json",
+    });
+
+    res.end(
+      JSON.stringify({
+        message: "Not Found",
+      })
+    );
+  });
+
+
+  healthServer.listen(
+    HEALTH_PORT,
+    "0.0.0.0",
+    () => {
+      console.log(
+        `[worker] Health server listening on port ${HEALTH_PORT}`
+      );
+    }
+  );
+
+
+  healthServer.on(
+    "error",
+    (error) => {
+      console.error(
+        `[worker] Health server error: ${error.message}`
+      );
+    }
+  );
+};
+
+
+// -----------------------------------------------------------------------------
+// PROCESS ONE JOB
+// -----------------------------------------------------------------------------
 
 const processJob = async (job) => {
   const {
@@ -71,25 +159,26 @@ const processJob = async (job) => {
     scheduled = false,
   } = job.data || {};
 
+
   let executionId =
     job.data?.executionId || null;
+
 
   console.log(
     `[worker] Starting job ${job.id} | workflow=${workflowId} | trigger=${triggerType} | attempt=${job.attemptsMade + 1}`
   );
 
 
-  /*
-  |--------------------------------------------------------------------------
-  | VALIDATE JOB DATA
-  |--------------------------------------------------------------------------
-  */
+  // ---------------------------------------------------------------------------
+  // VALIDATE JOB DATA
+  // ---------------------------------------------------------------------------
 
   if (!workflowId) {
     throw new Error(
       "Workflow ID is missing from queue job."
     );
   }
+
 
   if (!ownerId) {
     throw new Error(
@@ -98,16 +187,15 @@ const processJob = async (job) => {
   }
 
 
-  /*
-  |--------------------------------------------------------------------------
-  | LOAD WORKFLOW
-  |--------------------------------------------------------------------------
-  */
+  // ---------------------------------------------------------------------------
+  // LOAD WORKFLOW
+  // ---------------------------------------------------------------------------
 
   const workflow = await Workflow.findOne({
     _id: workflowId,
     owner: ownerId,
   });
+
 
   if (!workflow) {
     throw new Error(
@@ -116,17 +204,12 @@ const processJob = async (job) => {
   }
 
 
-  /*
-  |--------------------------------------------------------------------------
-  | CHECK WORKFLOW STATUS
-  |--------------------------------------------------------------------------
-  |
-  | Scheduled jobs can remain in Redis for a short period after a
-  | workflow is paused/deleted.
-  |
-  | Don't execute an inactive scheduled workflow.
-  |
-  */
+  // ---------------------------------------------------------------------------
+  // CHECK WORKFLOW STATUS
+  // ---------------------------------------------------------------------------
+
+  // Scheduled jobs may remain in Redis briefly after a workflow has been
+  // paused/deleted. Don't execute inactive scheduled workflows.
 
   if (
     scheduled &&
@@ -136,6 +219,7 @@ const processJob = async (job) => {
       `[worker] Skipping scheduled job ${job.id} because workflow is ${workflow.status}`
     );
 
+
     return {
       status: "skipped",
       reason: "Workflow is not active.",
@@ -143,18 +227,14 @@ const processJob = async (job) => {
   }
 
 
-  /*
-  |--------------------------------------------------------------------------
-  | CREATE EXECUTION FOR SCHEDULED JOBS
-  |--------------------------------------------------------------------------
-  |
-  | Manual/webhook/event executions already have an execution
-  | document created by the API.
-  |
-  | Schedule jobs are repeatable BullMQ jobs, so every schedule
-  | tick needs a brand-new Execution document.
-  |
-  */
+  // ---------------------------------------------------------------------------
+  // CREATE EXECUTION
+  // ---------------------------------------------------------------------------
+
+  // Manual/webhook/event executions normally already have an execution
+  // document created by the API.
+  //
+  // Schedule jobs need a fresh execution document for every tick.
 
   if (!executionId) {
     const execution =
@@ -166,15 +246,14 @@ const processJob = async (job) => {
         input: input || {},
       });
 
+
     executionId = execution._id;
   }
 
 
-  /*
-  |--------------------------------------------------------------------------
-  | MARK EXECUTION AS RUNNING
-  |--------------------------------------------------------------------------
-  */
+  // ---------------------------------------------------------------------------
+  // MARK EXECUTION AS RUNNING
+  // ---------------------------------------------------------------------------
 
   await markRunning(
     executionId,
@@ -184,11 +263,9 @@ const processJob = async (job) => {
   );
 
 
-  /*
-  |--------------------------------------------------------------------------
-  | EXECUTE WORKFLOW
-  |--------------------------------------------------------------------------
-  */
+  // ---------------------------------------------------------------------------
+  // EXECUTE WORKFLOW
+  // ---------------------------------------------------------------------------
 
   try {
     const executionResult =
@@ -197,11 +274,10 @@ const processJob = async (job) => {
         ownerId: workflow.owner,
         input: input || {},
 
-        /*
-        |--------------------------------------------------------------------------
-        | NODE START CALLBACK
-        |--------------------------------------------------------------------------
-        */
+
+        // ---------------------------------------------------------------------
+        // NODE START CALLBACK
+        // ---------------------------------------------------------------------
 
         onNodeStart: async ({
           node,
@@ -245,11 +321,9 @@ const processJob = async (job) => {
         },
 
 
-        /*
-        |--------------------------------------------------------------------------
-        | NODE COMPLETE CALLBACK
-        |--------------------------------------------------------------------------
-        */
+        // ---------------------------------------------------------------------
+        // NODE COMPLETE CALLBACK
+        // ---------------------------------------------------------------------
 
         onNodeComplete: async (
           resultRecord
@@ -266,11 +340,9 @@ const processJob = async (job) => {
       });
 
 
-    /*
-    |--------------------------------------------------------------------------
-    | FINALIZE SUCCESS
-    |--------------------------------------------------------------------------
-    */
+    // -------------------------------------------------------------------------
+    // FINALIZE SUCCESS
+    // -------------------------------------------------------------------------
 
     await finalizeExecution(
       executionId,
@@ -295,19 +367,14 @@ const processJob = async (job) => {
 
     return {
       status: "success",
-      executionId: String(executionId),
+      executionId:
+        String(executionId),
     };
   } catch (error) {
 
-    /*
-    |--------------------------------------------------------------------------
-    | FINALIZE FAILED EXECUTION
-    |--------------------------------------------------------------------------
-    |
-    | Keep partial results so the Executions page can show which
-    | nodes completed before the failure.
-    |
-    */
+    // -------------------------------------------------------------------------
+    // FINALIZE FAILED EXECUTION
+    // -------------------------------------------------------------------------
 
     await finalizeExecution(
       executionId,
@@ -338,48 +405,57 @@ const processJob = async (job) => {
     );
 
 
-    /*
-    |--------------------------------------------------------------------------
-    | IMPORTANT
-    |--------------------------------------------------------------------------
-    |
-    | Re-throwing allows BullMQ to apply:
-    |
-    | attempts: 3
-    | exponential backoff
-    |
-    */
-
+    // Re-throw so BullMQ retries according to queue settings.
     throw error;
   }
 };
 
 
-/*
-|--------------------------------------------------------------------------
-| START WORKER
-|--------------------------------------------------------------------------
-*/
+// -----------------------------------------------------------------------------
+// START WORKER
+// -----------------------------------------------------------------------------
 
 const startWorker = async () => {
+  let worker = null;
+
+
   try {
 
-    /*
-    |--------------------------------------------------------------------------
-    | CONNECT DATABASE
-    |--------------------------------------------------------------------------
-    */
+    // -------------------------------------------------------------------------
+    // START HEALTH SERVER
+    // -------------------------------------------------------------------------
+
+    // Start this early so Back4App has a listening HTTP port while the worker
+    // establishes MongoDB/Redis connections.
+
+    startHealthServer();
+
+
+    // -------------------------------------------------------------------------
+    // CONNECT DATABASE
+    // -------------------------------------------------------------------------
+
+    console.log(
+      "[worker] Connecting to MongoDB..."
+    );
+
 
     await connectDB();
 
 
-    /*
-    |--------------------------------------------------------------------------
-    | CREATE BULLMQ WORKER
-    |--------------------------------------------------------------------------
-    */
+    workerState.mongoConnected = true;
 
-    const worker = new Worker(
+
+    console.log(
+      "[worker] MongoDB connection ready."
+    );
+
+
+    // -------------------------------------------------------------------------
+    // CREATE BULLMQ WORKER
+    // -------------------------------------------------------------------------
+
+    worker = new Worker(
       QUEUE_NAME,
       processJob,
       {
@@ -388,11 +464,7 @@ const startWorker = async () => {
         concurrency:
           CONCURRENCY,
 
-        /*
-         * Prevent a job from being considered stalled too quickly
-         * during longer AI/API operations.
-         */
-
+        // Prevent longer AI/API operations from being marked stalled too soon.
         stalledInterval: 30000,
 
         maxStalledCount: 2,
@@ -400,31 +472,37 @@ const startWorker = async () => {
     );
 
 
-    /*
-    |--------------------------------------------------------------------------
-    | WORKER READY
-    |--------------------------------------------------------------------------
-    */
+    // -------------------------------------------------------------------------
+    // WORKER READY
+    // -------------------------------------------------------------------------
 
     worker.on(
       "ready",
       () => {
+        workerState.redisConnected = true;
+        workerState.status = "ready";
+
+
         console.log(
           `[worker] Connected to Redis and listening on "${QUEUE_NAME}"`
         );
 
+
         console.log(
           `[worker] Concurrency: ${CONCURRENCY}`
+        );
+
+
+        console.log(
+          `[worker] Health endpoint: http://0.0.0.0:${HEALTH_PORT}/health`
         );
       }
     );
 
 
-    /*
-    |--------------------------------------------------------------------------
-    | COMPLETED
-    |--------------------------------------------------------------------------
-    */
+    // -------------------------------------------------------------------------
+    // COMPLETED
+    // -------------------------------------------------------------------------
 
     worker.on(
       "completed",
@@ -436,11 +514,9 @@ const startWorker = async () => {
     );
 
 
-    /*
-    |--------------------------------------------------------------------------
-    | FAILED
-    |--------------------------------------------------------------------------
-    */
+    // -------------------------------------------------------------------------
+    // FAILED
+    // -------------------------------------------------------------------------
 
     worker.on(
       "failed",
@@ -452,11 +528,9 @@ const startWorker = async () => {
     );
 
 
-    /*
-    |--------------------------------------------------------------------------
-    | STALLED
-    |--------------------------------------------------------------------------
-    */
+    // -------------------------------------------------------------------------
+    // STALLED
+    // -------------------------------------------------------------------------
 
     worker.on(
       "stalled",
@@ -468,15 +542,17 @@ const startWorker = async () => {
     );
 
 
-    /*
-    |--------------------------------------------------------------------------
-    | ERROR
-    |--------------------------------------------------------------------------
-    */
+    // -------------------------------------------------------------------------
+    // ERROR
+    // -------------------------------------------------------------------------
 
     worker.on(
       "error",
       (error) => {
+        workerState.redisConnected = false;
+        workerState.status = "degraded";
+
+
         console.error(
           `[worker] Worker error: ${error.message}`
         );
@@ -484,11 +560,9 @@ const startWorker = async () => {
     );
 
 
-    /*
-    |--------------------------------------------------------------------------
-    | GRACEFUL SHUTDOWN
-    |--------------------------------------------------------------------------
-    */
+    // -------------------------------------------------------------------------
+    // GRACEFUL SHUTDOWN
+    // -------------------------------------------------------------------------
 
     const shutdown = async (
       signal
@@ -497,18 +571,47 @@ const startWorker = async () => {
         `[worker] ${signal} received. Shutting down...`
       );
 
-      try {
-        await worker.close();
 
-        console.log(
-          "[worker] Worker closed successfully."
-        );
+      workerState.status = "stopping";
+
+
+      try {
+
+        // Stop accepting new BullMQ jobs.
+        if (worker) {
+          await worker.close();
+
+
+          console.log(
+            "[worker] Worker closed successfully."
+          );
+        }
+
+
+        // Stop HTTP health server.
+        if (healthServer) {
+          await new Promise(
+            (resolve) => {
+              healthServer.close(
+                () => resolve()
+              );
+            }
+          );
+
+
+          console.log(
+            "[worker] Health server closed successfully."
+          );
+        }
+
 
         process.exit(0);
+
       } catch (error) {
         console.error(
           `[worker] Shutdown error: ${error.message}`
         );
+
 
         process.exit(1);
       }
@@ -520,6 +623,7 @@ const startWorker = async () => {
       () => shutdown("SIGINT")
     );
 
+
     process.once(
       "SIGTERM",
       () => shutdown("SIGTERM")
@@ -528,20 +632,34 @@ const startWorker = async () => {
 
   } catch (error) {
 
+    workerState.status = "failed";
+
+
     console.error(
       "[worker] Failed to start:",
       error
     );
+
+
+    if (healthServer) {
+      healthServer.close(
+        () => {
+          process.exit(1);
+        }
+      );
+
+
+      return;
+    }
+
 
     process.exit(1);
   }
 };
 
 
-/*
-|--------------------------------------------------------------------------
-| BOOT
-|--------------------------------------------------------------------------
-*/
+// -----------------------------------------------------------------------------
+// BOOT
+// -----------------------------------------------------------------------------
 
 startWorker();
