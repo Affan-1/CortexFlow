@@ -53,6 +53,8 @@ import {
   Check,
   Rocket,
   Pause,
+  Plus,
+  X,
 } from "lucide-react";
 
 /* -------------------------------------------------------------------------- */
@@ -388,6 +390,9 @@ const FlowCanvas = ({
 }) => {
   const [selectedNodeId, setSelectedNodeId] = useState(null);
 
+  // Mobile only: controls the "Add node" bottom sheet
+  const [paletteOpen, setPaletteOpen] = useState(false);
+
   const { screenToFlowPosition } = useReactFlow();
 
   const selectedNode =
@@ -532,6 +537,43 @@ const FlowCanvas = ({
     [screenToFlowPosition, setNodes]
   );
 
+  /* ---------------------------------------------------------------- */
+  /* MOBILE: tap a node in the sheet to add it (no dragging needed)   */
+  /* ---------------------------------------------------------------- */
+
+  const addNodeFromPalette = useCallback(
+    (item, kind) => {
+      // put the new node in the middle of the screen, with a small random offset
+      const center = screenToFlowPosition({
+        x: window.innerWidth / 2,
+        y: window.innerHeight / 2,
+      });
+
+      const jitter = () => Math.round((Math.random() - 0.5) * 80);
+
+      const newNode = {
+        id: getNodeId(),
+        type: "custom",
+        position: {
+          x: center.x - 95 + jitter(),
+          y: center.y + jitter(),
+        },
+        data: {
+          label: item.name,
+          icon: item.icon,
+          kind,
+          key: item.key,
+          config: {},
+        },
+      };
+
+      setNodes((currentNodes) => [...currentNodes, newNode]);
+      setSelectedNodeId(newNode.id);
+      setPaletteOpen(false);
+    },
+    [screenToFlowPosition, setNodes]
+  );
+
   return (
     <div
       className="relative h-full w-full"
@@ -582,6 +624,7 @@ const FlowCanvas = ({
         <Controls showInteractive={false} />
 
         <MiniMap
+          className="!hidden md:!block"
           pannable
           zoomable
           nodeColor="#168FFF"
@@ -595,6 +638,95 @@ const FlowCanvas = ({
         onUpdate={handleNodeUpdate}
         onDelete={handleNodeDelete}
       />
+
+      {/* ------------------------------------------------------------ */}
+      {/* MOBILE: "Add node" button + bottom sheet.                    */}
+      {/* On desktop (lg and up) the left palette is used instead.     */}
+      {/* ------------------------------------------------------------ */}
+      <button
+        type="button"
+        onClick={() => setPaletteOpen(true)}
+        aria-label="Add node"
+        className="absolute left-3 top-3 z-10 flex h-10 items-center gap-2 rounded-xl border border-[#168FFF]/30 bg-[#050609]/90 px-3.5 text-[12px] font-medium text-white shadow-lg shadow-black/40 backdrop-blur transition hover:border-[#168FFF]/60 lg:hidden"
+      >
+        <Plus size={16} strokeWidth={2} className="text-[#168FFF]" />
+        Add node
+      </button>
+
+      {paletteOpen && (
+        <div
+          className="fixed inset-0 z-50 lg:hidden"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Add node"
+        >
+          <div
+            className="absolute inset-0 bg-black/60 backdrop-blur-sm"
+            onClick={() => setPaletteOpen(false)}
+          />
+
+          <div className="absolute inset-x-0 bottom-0 flex max-h-[78vh] flex-col rounded-t-2xl border-t border-white/[0.09] bg-[#050609]">
+            <div className="flex shrink-0 items-center justify-between px-5 pb-3 pt-4">
+              <div>
+                <p className="text-[14px] font-semibold text-white">
+                  Add a node
+                </p>
+                <p className="text-[11px] text-zinc-500">
+                  Tap a node to add it to the canvas
+                </p>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => setPaletteOpen(false)}
+                aria-label="Close"
+                className="flex h-9 w-9 items-center justify-center rounded-lg border border-white/[0.08] text-zinc-400 transition hover:bg-white/[0.05] hover:text-white"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            <div className="overflow-y-auto px-5 pb-8">
+              {nodeGroups.map((group) => (
+                <div key={group.label} className="mb-5">
+                  <p className="mb-2 text-[11px] font-medium text-zinc-500">
+                    {group.label}
+                  </p>
+
+                  <div className="grid grid-cols-2 gap-2">
+                    {group.items.map((item) => {
+                      const Icon = item.icon;
+
+                      return (
+                        <button
+                          key={item.key}
+                          type="button"
+                          onClick={() =>
+                            addNodeFromPalette(item, group.kind)
+                          }
+                          className="flex items-center gap-2.5 rounded-xl border border-white/[0.07] bg-white/[0.02] px-3 py-3 text-left transition active:bg-white/[0.07]"
+                        >
+                          <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-[#168FFF]/25 bg-[#168FFF]/10">
+                            <Icon
+                              size={15}
+                              strokeWidth={1.7}
+                              className="text-[#168FFF]"
+                            />
+                          </div>
+
+                          <span className="truncate text-[12px] text-zinc-200">
+                            {item.name}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
@@ -1488,7 +1620,7 @@ const WorkflowBuilder = () => {
   /* ---------------------------------------------------------------------- */
 
   return (
-    <div className="flex h-screen flex-col bg-[#030303] text-white">
+    <div className="flex h-[100dvh] flex-col bg-[#030303] text-white">
       {/* HEADER */}
       <header className="flex h-[64px] shrink-0 items-center justify-between border-b border-white/[0.07] bg-[#050609] px-4 sm:px-6">
         <div className="flex min-w-0 items-center gap-4">
