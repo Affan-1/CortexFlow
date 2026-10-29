@@ -1,4 +1,5 @@
 import React from "react";
+
 import {
   BrowserRouter,
   Routes,
@@ -12,6 +13,7 @@ import {
 } from "./components/ProtectedRoute";
 
 import DashboardLayout from "./layouts/DashboardLayout";
+import Landing from "./pages/Landing";
 
 import Dashboard from "./pages/Dashboard";
 import Workflows from "./pages/Workflows";
@@ -34,6 +36,8 @@ const App = () => {
             AUTH ROUTES
         ========================== */}
 
+
+        <Route path='/' element={<Landing/>}/>
         <Route
           path="/login"
           element={
