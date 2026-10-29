@@ -10,6 +10,7 @@ import {
   ChevronRight,
   Sparkles,
   Plus,
+  X,
 } from "lucide-react";
 
 const navigation = [
@@ -40,11 +41,29 @@ const navigation = [
   },
 ];
 
-const Sidebar = () => {
+// open / onClose control the slide-in menu on phones and tablets.
+// On desktop (lg and up) the sidebar is always visible, so they are ignored.
+const Sidebar = ({ open = false, onClose = () => {} }) => {
   return (
-    <aside className="fixed left-0 top-0 z-40 hidden h-screen w-[250px] flex-col border-r border-white/[0.07] bg-[#050609] lg:flex">
+    <>
+    {/* Dark overlay behind the menu (mobile only). Tap it to close. */}
+    <div
+      onClick={onClose}
+      aria-hidden="true"
+      className={`fixed inset-0 z-40 bg-black/60 backdrop-blur-sm transition-opacity duration-300 lg:hidden ${
+        open ? "opacity-100" : "pointer-events-none opacity-0"
+      }`}
+    />
+
+    <aside
+      id="app-sidebar"
+      aria-label="Main navigation"
+      className={`fixed left-0 top-0 z-50 flex h-screen w-[250px] flex-col border-r border-white/[0.07] bg-[#050609] transition-[transform,visibility] duration-300 ease-out motion-reduce:transition-none lg:visible lg:translate-x-0 ${
+        open ? "visible translate-x-0" : "invisible -translate-x-full"
+      }`}
+    >
       {/* Logo */}
-      <div className="flex h-[76px] items-center border-b border-white/[0.07] px-6">
+      <div className="flex h-[76px] items-center justify-between border-b border-white/[0.07] px-6">
         <div className="flex items-center gap-3">
           <div className="relative flex h-9 w-9 items-center justify-center rounded-xl border border-[#168FFF]/30 bg-[#168FFF]/10">
             <Sparkles
@@ -66,12 +85,23 @@ const Sidebar = () => {
             </p>
           </div>
         </div>
+
+        {/* Close button (mobile only) */}
+        <button
+          type="button"
+          onClick={onClose}
+          aria-label="Close menu"
+          className="flex h-9 w-9 items-center justify-center rounded-lg border border-white/[0.08] text-zinc-400 transition-colors hover:bg-white/[0.05] hover:text-white lg:hidden"
+        >
+          <X size={18} />
+        </button>
       </div>
 
       {/* Create workflow */}
       <div className="px-4 pt-6">
         <NavLink
           to="/workflows/new"
+          onClick={onClose}
           className="group flex w-full items-center justify-between rounded-xl border border-[#168FFF]/30 bg-[#168FFF]/10 px-4 py-3 transition-all duration-300 hover:border-[#168FFF]/60 hover:bg-[#168FFF]/15"
         >
           <div className="flex items-center gap-3">
@@ -105,6 +135,7 @@ const Sidebar = () => {
               <NavLink
                 key={item.path}
                 to={item.path}
+                onClick={onClose}
                 className={({ isActive }) =>
                   `group flex items-center gap-3 rounded-lg px-3 py-2.5 transition-all duration-300 ${isActive
                     ? "border border-white/[0.06] bg-white/[0.06] text-white"
@@ -145,6 +176,7 @@ const Sidebar = () => {
 
           <NavLink
             to="/settings"
+            onClick={onClose}
             className={({ isActive }) =>
               `group flex items-center gap-3 rounded-lg px-3 py-2.5 transition-all duration-300 ${isActive
                 ? "border border-white/[0.06] bg-white/[0.06] text-white"
@@ -201,6 +233,7 @@ const Sidebar = () => {
         </div>
       </div>
     </aside>
+    </>
   );
 };
 
